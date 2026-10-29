@@ -1,3 +1,320 @@
+#!/usr/bin/env Rscript
+
+# =============================================================================
+# normalize_GSE145989_GSE18995.R
+#
+# Purpose:
+#   Normalize the two GEO-derived, GPL570-annotated gene-expression matrices
+#   using the workflow in the supplied geo05.normalize.R, then select the final
+#   donor-paired samples and write:
+#     inputs/GSE145989_normalized_gene_expression.tsv
+#     inputs/GSE18995_normalized_gene_expression.tsv
+#
+# Input files (edit paths below if needed):
+#   GPL570_annotated_output/GSE145989_gene_symbol_expression.tsv
+#   GPL570_annotated_output/GSE18995_gene_symbol_expression.tsv
+#
+# Processing:
+#   - Reads annotated gene-symbol matrices; no CEL files are used.
+#   - Averages any duplicated gene rows using limma::avereps().
+#   - Uses the same scale heuristic as geo05.normalize.R to decide whether to
+#     apply log2(x + 1).
+#   - Applies limma::normalizeBetweenArrays() to all samples in each dataset
+#     separately, before selecting the final paired samples.
+#   - Does not merge cohorts or perform cross-cohort batch correction.
+#   - Selects samples from the final Table S1 pair map: 53 pairs for GSE145989
+#     and 16 pairs for GSE18995.
+#
+# Important GSE18995 note:
+#   The supplied s1(2).txt and s2(2).txt contain 18 Control and 17 Treat GSMs.
+#   The final Table S1 pair map retains 16 matched pairs. This script follows
+#   the final pair map and therefore excludes GSM469903, GSM469906, and GSM469910
+#   from the final GSE18995 paired output. They may still be present in the
+#   input matrix and are included in the within-dataset normalization step.
+#
+# Run from the project root:
+#   Rscript normalize_GSE145989_GSE18995.R
+# =============================================================================
+
+options(stringsAsFactors = FALSE, warn = 1)
+
+if (!requireNamespace("limma", quietly = TRUE)) {
+  stop("Package 'limma' is required. Install it with BiocManager::install('limma').")
+}
+library(limma)
+
+# ------------------------------- USER SETTINGS -------------------------------
+
+INPUT_FILES <- c(
+  GSE145989 = "GPL570_annotated_output/GSE145989_gene_symbol_expression.tsv",
+  GSE18995  = "GPL570_annotated_output/GSE18995_gene_symbol_expression.tsv"
+)
+
+OUTPUT_DIR <- "inputs"
+REPORT_DIR <- "normalization_reports"
+NORMALIZE_ALL_MATRIX_SAMPLES_FIRST <- TRUE
+
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(REPORT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# ---------------------------- FINAL PAIR MAPS ---------------------------------
+PAIR_MAPS <- list(
+  GSE145989 = do.call(rbind, list(
+    data.frame(Donor_ID="Toronto_571", CIT_GSM="GSM4343791", HR_GSM="GSM4343761", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_575", CIT_GSM="GSM4343769", HR_GSM="GSM4343770", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_578", CIT_GSM="GSM4343775", HR_GSM="GSM4343776", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_589", CIT_GSM="GSM4343779", HR_GSM="GSM4343781", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_602", CIT_GSM="GSM4343744", HR_GSM="GSM4343746", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_605", CIT_GSM="GSM4343784", HR_GSM="GSM4343787", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_606", CIT_GSM="GSM4343732", HR_GSM="GSM4343733", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_607", CIT_GSM="GSM4343795", HR_GSM="GSM4343796", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_614", CIT_GSM="GSM4343800", HR_GSM="GSM4343801", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_618", CIT_GSM="GSM4343676", HR_GSM="GSM4343677", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_626", CIT_GSM="GSM4343693", HR_GSM="GSM4343694", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_627", CIT_GSM="GSM4343777", HR_GSM="GSM4343778", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_635", CIT_GSM="GSM4343797", HR_GSM="GSM4343798", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_639", CIT_GSM="GSM4343807", HR_GSM="GSM4343808", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_645", CIT_GSM="GSM4343762", HR_GSM="GSM4343763", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_652", CIT_GSM="GSM4343666", HR_GSM="GSM4343668", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_654", CIT_GSM="GSM4343702", HR_GSM="GSM4343704", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_659", CIT_GSM="GSM4343771", HR_GSM="GSM4343774", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_667", CIT_GSM="GSM4343809", HR_GSM="GSM4343810", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_679", CIT_GSM="GSM4343678", HR_GSM="GSM4343679", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_684", CIT_GSM="GSM4343683", HR_GSM="GSM4343684", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_686", CIT_GSM="GSM4343685", HR_GSM="GSM4343686", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_690", CIT_GSM="GSM4343816", HR_GSM="GSM4343817", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_692", CIT_GSM="GSM4343742", HR_GSM="GSM4343743", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_699", CIT_GSM="GSM4343673", HR_GSM="GSM4343675", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_704", CIT_GSM="GSM4343741", HR_GSM="GSM4343749", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_705", CIT_GSM="GSM4343714", HR_GSM="GSM4343715", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_717", CIT_GSM="GSM4343669", HR_GSM="GSM4343670", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_719", CIT_GSM="GSM4343719", HR_GSM="GSM4343720", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_728", CIT_GSM="GSM4343811", HR_GSM="GSM4343812", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_740", CIT_GSM="GSM4343707", HR_GSM="GSM4343708", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_744", CIT_GSM="GSM4343736", HR_GSM="GSM4343737", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_747", CIT_GSM="GSM4343691", HR_GSM="GSM4343692", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_757", CIT_GSM="GSM4343680", HR_GSM="GSM4343682", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_758", CIT_GSM="GSM4343696", HR_GSM="GSM4343697", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_763", CIT_GSM="GSM4343700", HR_GSM="GSM4343701", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_772", CIT_GSM="GSM4343705", HR_GSM="GSM4343706", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_780", CIT_GSM="GSM4343671", HR_GSM="GSM4343672", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_785", CIT_GSM="GSM4343757", HR_GSM="GSM4343758", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_786", CIT_GSM="GSM4343750", HR_GSM="GSM4343751", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_793", CIT_GSM="GSM4343709", HR_GSM="GSM4343711", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_796", CIT_GSM="GSM4343734", HR_GSM="GSM4343735", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_824", CIT_GSM="GSM4343712", HR_GSM="GSM4343713", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_828", CIT_GSM="GSM4343729", HR_GSM="GSM4343730", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_832", CIT_GSM="GSM4343753", HR_GSM="GSM4343754", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_833", CIT_GSM="GSM4343782", HR_GSM="GSM4343783", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_834", CIT_GSM="GSM4343739", HR_GSM="GSM4343740", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_853", CIT_GSM="GSM4343802", HR_GSM="GSM4343803", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_855", CIT_GSM="GSM4343721", HR_GSM="GSM4343690", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_857", CIT_GSM="GSM4343766", HR_GSM="GSM4343768", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_858", CIT_GSM="GSM4343727", HR_GSM="GSM4343728", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_864", CIT_GSM="GSM4343793", HR_GSM="GSM4343794", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="Toronto_898", CIT_GSM="GSM4343725", HR_GSM="GSM4343726", stringsAsFactors=FALSE)
+  )),
+  GSE18995 = do.call(rbind, list(
+    data.frame(Donor_ID="DBD_patient_01", CIT_GSM="GSM469912", HR_GSM="GSM469918", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_02", CIT_GSM="GSM469913", HR_GSM="GSM469919", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_03", CIT_GSM="GSM469914", HR_GSM="GSM469920", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_04", CIT_GSM="GSM469915", HR_GSM="GSM469921", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_05", CIT_GSM="GSM469916", HR_GSM="GSM469922", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_06", CIT_GSM="GSM469917", HR_GSM="GSM469923", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_07", CIT_GSM="GSM469924", HR_GSM="GSM469930", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_08", CIT_GSM="GSM469925", HR_GSM="GSM469931", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_09", CIT_GSM="GSM469926", HR_GSM="GSM469932", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_10", CIT_GSM="GSM469927", HR_GSM="GSM469933", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_11", CIT_GSM="GSM469928", HR_GSM="GSM469934", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DBD_patient_12", CIT_GSM="GSM469929", HR_GSM="GSM469935", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DCD_patient_01", CIT_GSM="GSM469901", HR_GSM="GSM469907", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DCD_patient_02", CIT_GSM="GSM469902", HR_GSM="GSM469908", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DCD_patient_04", CIT_GSM="GSM469904", HR_GSM="GSM469909", stringsAsFactors=FALSE),
+    data.frame(Donor_ID="DCD_patient_06", CIT_GSM="GSM469905", HR_GSM="GSM469911", stringsAsFactors=FALSE)
+  ))
+)
+
+for (gse in names(PAIR_MAPS)) {
+  row.names(PAIR_MAPS[[gse]]) <- NULL
+}
+stopifnot(nrow(PAIR_MAPS$GSE145989) == 53L)
+stopifnot(nrow(PAIR_MAPS$GSE18995) == 16L)
+
+# ------------------------------- FUNCTIONS ------------------------------------
+
+read_gene_matrix <- function(path, gse) {
+  if (!file.exists(path)) {
+    stop(
+      "Input matrix not found for ", gse, ": ", path,
+      "\nRun the GPL570 matrix annotation script first, or edit INPUT_FILES."
+    )
+  }
+  
+  dat <- read.delim(
+    path, header = TRUE, sep = "\t", check.names = FALSE,
+    quote = "", comment.char = "", stringsAsFactors = FALSE,
+    na.strings = c("", "NA", "NaN", "null")
+  )
+  if (ncol(dat) < 2L) stop(gse, ": input must have a gene-ID column plus sample columns.")
+  
+  gene_id <- trimws(as.character(dat[[1]]))
+  if (anyNA(gene_id) || any(!nzchar(gene_id))) {
+    stop(gse, ": blank or missing gene IDs found in the first column.")
+  }
+  
+  value_df <- dat[, -1, drop = FALSE]
+  value_df[] <- lapply(value_df, function(x) suppressWarnings(as.numeric(as.character(x))))
+  expr <- as.matrix(value_df)
+  rownames(expr) <- gene_id
+  
+  if (all(is.na(expr))) stop(gse, ": no numeric expression values found.")
+  if (anyDuplicated(colnames(expr))) stop(gse, ": duplicated sample-column names found.")
+  
+  # Same behavior as geo05.normalize.R: average duplicate row IDs if any remain.
+  expr <- limma::avereps(expr)
+  expr
+}
+
+normalize_matrix <- function(expr, gse) {
+  qx <- as.numeric(stats::quantile(
+    expr, probs = c(0, 0.25, 0.5, 0.75, 0.99, 1.0),
+    na.rm = TRUE, names = FALSE
+  ))
+  log_needed <- (qx[5] > 100) || ((qx[6] - qx[1]) > 50 && qx[2] > 0)
+  
+  if (log_needed) {
+    # Match the supplied geo05.normalize.R behavior.
+    expr[expr < 0] <- 0
+    expr <- log2(expr + 1)
+    message(gse, ": applied log2(x + 1) based on the expression-scale heuristic.")
+  } else {
+    message(gse, ": no additional log2 transformation applied.")
+  }
+  
+  if (NORMALIZE_ALL_MATRIX_SAMPLES_FIRST) {
+    # Match geo05.normalize.R: normalize all available matrix columns first,
+    # then subset the final donor-paired samples.
+    normalized <- limma::normalizeBetweenArrays(expr)
+  } else {
+    normalized <- expr
+  }
+  
+  list(matrix = normalized, log_transform_applied = log_needed, quantiles = qx)
+}
+
+make_paired_output <- function(norm_expr, pair_map, gse) {
+  cit <- pair_map$CIT_GSM
+  hr  <- pair_map$HR_GSM
+  required <- c(cit, hr)
+  missing <- setdiff(required, colnames(norm_expr))
+  if (length(missing)) {
+    stop(
+      gse, ": input matrix is missing required GSM(s): ",
+      paste(missing, collapse = ", "),
+      "\nCheck that the correct GEO matrix was annotated and that its columns use GSM accessions."
+    )
+  }
+  
+  if (NORMALIZE_ALL_MATRIX_SAMPLES_FIRST) {
+    data_norm <- norm_expr
+  } else {
+    # If the optional setting is FALSE, normalize only the final selected samples.
+    data_norm <- limma::normalizeBetweenArrays(norm_expr[, required, drop = FALSE])
+  }
+  
+  # Preserve the downstream input layout: all CIT/Control columns first,
+  # followed by all HR/Treat columns.
+  paired <- cbind(
+    data_norm[, cit, drop = FALSE],
+    data_norm[, hr, drop = FALSE]
+  )
+  colnames(paired) <- c(paste0(cit, "_Control"), paste0(hr, "_Treat"))
+  paired
+}
+
+# ---------------------------------- RUN ---------------------------------------
+
+summary_rows <- list()
+
+for (gse in names(INPUT_FILES)) {
+  message("\n========== ", gse, " ==========")
+  expr <- read_gene_matrix(INPUT_FILES[[gse]], gse)
+  pair_map <- PAIR_MAPS[[gse]]
+  
+  message("Input matrix: ", nrow(expr), " genes x ", ncol(expr), " samples")
+  norm_result <- normalize_matrix(expr, gse)
+  norm_expr <- norm_result$matrix
+  
+  paired <- make_paired_output(norm_expr, pair_map, gse)
+  out_file <- file.path(OUTPUT_DIR, paste0(gse, "_normalized_gene_expression.tsv"))
+  
+  # Write a conventional tab-delimited matrix with gene IDs in column 1 and
+  # sample IDs in the header; compatible with downstream read.delim(...).
+  out_df <- data.frame(id = rownames(paired), paired, check.names = FALSE)
+  write.table(
+    out_df, file = out_file, sep = "\t", quote = FALSE,
+    row.names = FALSE, col.names = TRUE, na = ""
+  )
+  
+  sample_map <- data.frame(
+    Donor_ID = pair_map$Donor_ID,
+    CIT_GSM = pair_map$CIT_GSM,
+    HR_GSM = pair_map$HR_GSM,
+    CIT_output_column = paste0(pair_map$CIT_GSM, "_Control"),
+    HR_output_column = paste0(pair_map$HR_GSM, "_Treat"),
+    stringsAsFactors = FALSE
+  )
+  write.csv(
+    sample_map,
+    file = file.path(REPORT_DIR, paste0(gse, "_sample_map.csv")),
+    row.names = FALSE
+  )
+  
+  report <- c(
+    paste0("Dataset: ", gse),
+    paste0("Input file: ", INPUT_FILES[[gse]]),
+    paste0("Input genes after duplicate averaging: ", nrow(expr)),
+    paste0("Input matrix samples: ", ncol(expr)),
+    paste0("Final donor pairs: ", nrow(pair_map)),
+    paste0("Final output samples: ", ncol(paired)),
+    paste0("Scale heuristic applied log2(x + 1): ", norm_result$log_transform_applied),
+    "Between-array normalization: limma::normalizeBetweenArrays",
+    paste0("Normalize all matrix samples before selecting final pairs: ",
+           NORMALIZE_ALL_MATRIX_SAMPLES_FIRST),
+    "CEL files used for expression calculation: no",
+    paste0("R version: ", R.version.string),
+    paste0("limma version: ", as.character(utils::packageVersion("limma"))),
+    paste0("Run time: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"))
+  )
+  writeLines(report, file.path(REPORT_DIR, paste0(gse, "_normalization_report.txt")))
+  
+  summary_rows[[gse]] <- data.frame(
+    Dataset = gse,
+    Input_genes = nrow(expr),
+    Input_samples = ncol(expr),
+    Final_pairs = nrow(pair_map),
+    Final_samples = ncol(paired),
+    Log2_transform_applied = norm_result$log_transform_applied,
+    Output_file = out_file,
+    stringsAsFactors = FALSE
+  )
+  
+  message("Wrote: ", out_file)
+  message("Output dimensions: ", nrow(paired), " genes x ", ncol(paired), " samples.")
+}
+
+summary_table <- do.call(rbind, summary_rows)
+write.csv(
+  summary_table,
+  file = file.path(REPORT_DIR, "normalization_summary.csv"),
+  row.names = FALSE
+)
+
+message("\nCompleted both datasets independently.")
+message("GSE145989: 53 Control + 53 Treat samples.")
+message("GSE18995: 16 Control + 16 Treat samples.")
+message("No CEL files were used to calculate expression values.")
+
 # =============================================================================
 # SERPINE1 / PAI-1 LIRI MANUSCRIPT: SINGLE-FILE ENGLISH ANALYSIS WORKFLOW
 # Figure order: 1-8, followed by supplementary integration diagnostics.
